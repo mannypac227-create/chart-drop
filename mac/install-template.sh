@@ -1,7 +1,7 @@
 #!/bin/bash
 # Chart Drop installer. Run once on the Mac:  bash ~/Downloads/install-chart-drop.sh
 # It saves your GitHub key in the Mac Keychain and installs a small background
-# helper that scrambles each new chart screenshot and uploads it to github.com/mannypac227-create/chart-drop.
+# helper that uploads each new chart from ~/Dropbox/Charts to github.com/mannypac227-create/chart-drop.
 # To remove it later:  bash ~/Downloads/install-chart-drop.sh --uninstall
 set -e
 
@@ -49,8 +49,9 @@ if ! security find-generic-password -s chart-drop -a github >/dev/null 2>&1; the
   echo "GitHub key saved in your Keychain."
 fi
 
-# 2. The scramble key (the hourly brief has the same key, so only it can read the uploads).
-security add-generic-password -U -s chart-drop -a scramble -w "__SCRAMBLE_KEY__"
+# 2. Plain uploads now (no scrambling): remove the old scramble key and re-upload today's charts.
+security delete-generic-password -s chart-drop -a scramble >/dev/null 2>&1 || true
+rm -f "$DIR/uploaded.txt"
 
 # 3. The uploader script.
 cat > "$DIR/upload.sh" <<'CHARTDROP_EOF'
@@ -58,8 +59,7 @@ __UPLOADER__
 CHARTDROP_EOF
 chmod +x "$DIR/upload.sh"
 
-# 4. Run it in the background whenever a screenshot lands, and every 5 minutes.
-SHOTS=$(cd "$HOME/Dropbox/Screenshots" 2>/dev/null && pwd -P || echo "$HOME/Dropbox/Screenshots")
+# 4. Run it in the background whenever a chart lands in Dropbox/Charts, and every 5 minutes.
 CHARTS=$(cd "$HOME/Dropbox/Charts" 2>/dev/null && pwd -P || echo "$HOME/Dropbox/Charts")
 cat > "$PLIST" <<PLIST_EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -70,7 +70,7 @@ cat > "$PLIST" <<PLIST_EOF
   <key>ProgramArguments</key>
   <array><string>/bin/bash</string><string>$DIR/upload.sh</string></array>
   <key>WatchPaths</key>
-  <array><string>$SHOTS</string><string>$CHARTS</string></array>
+  <array><string>$CHARTS</string></array>
   <key>StartInterval</key><integer>300</integer>
   <key>RunAtLoad</key><true/>
   <key>StandardOutPath</key><string>$DIR/launchd.log</string>
@@ -83,14 +83,14 @@ launchctl bootout "gui/$UID_NUM" "$PLIST" 2>/dev/null || true
 launchctl bootstrap "gui/$UID_NUM" "$PLIST"
 
 # 5. Upload anything from the last 24 hours right now, so you can see it work.
-echo "Uploading your recent screenshots now..."
+echo "Uploading your charts from the last 24 hours now..."
 /bin/bash "$DIR/upload.sh" || true
 echo ""
 if [ -s "$DIR/upload.log" ]; then
   tail -n 5 "$DIR/upload.log"
 else
-  echo "No screenshots from the last 24 hours to upload yet."
+  echo "No charts from the last 24 hours to upload yet."
 fi
 echo ""
-echo "Done. New screenshots will now upload to GitHub by themselves."
+echo "Done. New charts saved in Dropbox/Charts will now upload to GitHub by themselves."
 echo "If macOS asks whether bash may access files in Dropbox, click Allow."

@@ -1,8 +1,9 @@
 #!/bin/bash
-# Chart Drop uploader: sends new chart screenshots from Dropbox on this Mac
-# to the private GitHub repo mannypac227-create/chart-drop, so the cloud
-# hourly brief can read them even when this Mac is closed.
-# Runs in the background (launchd) whenever a screenshot lands, and every 5 min.
+# Chart Drop uploader: sends new chart screenshots from ~/Dropbox/Charts on this Mac
+# to the public GitHub repo mannypac227-create/chart-drop, so the cloud hourly
+# brief can read them even when this Mac is closed. Only the Charts folder is
+# uploaded. Uploads older than yesterday are deleted from GitHub once a day.
+# Runs in the background (launchd) whenever a chart lands, and every 5 minutes.
 set -u
 
 REPO="mannypac227-create/chart-drop"
@@ -10,7 +11,7 @@ BRANCH="main"
 DIR="$HOME/.chart-drop"
 STATE="$DIR/uploaded.txt"
 LOG="$DIR/upload.log"
-WATCH=("$HOME/Dropbox/Screenshots" "$HOME/Dropbox/Charts")
+WATCH=("$HOME/Dropbox/Charts")
 MAX_AGE_MIN=1440   # catch up on anything from the last 24 hours
 
 mkdir -p "$DIR"
@@ -32,15 +33,12 @@ TOKEN=$(security find-generic-password -s chart-drop -a github -w 2>/dev/null) |
   log "No GitHub key saved in Keychain. Run the installer again."
   exit 1
 }
-# Screenshots are scrambled (AES-256) before upload, so the public repo only
-# holds unreadable files. Only the hourly brief has this key.
-SCRAMBLE=$(security find-generic-password -s chart-drop -a scramble -w 2>/dev/null) || {
-  log "No scramble key saved in Keychain. Run the installer again."
-  exit 1
-}
+api() { curl -sS --max-time 120 -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
+             -H "X-GitHub-Api-Version: 2022-11-28" "$@"; }
 
 sleep 3   # give a just-taken screenshot time to finish writing
 
+# 1. Upload new charts.
 for d in "${WATCH[@]}"; do
   [ -d "$d" ] || continue
   src=$(basename "$d" | tr 'A-Z ' 'a-z-')
@@ -55,25 +53,15 @@ for d in "${WATCH[@]}"; do
     day=$(TZ=America/New_York date -r "$mt" +%Y-%m-%d)
     stamp=$(TZ=America/New_York date -r "$mt" +%H-%M-%S)
     sum=$(md5 -q "$f" | cut -c1-8)
-    path="shots/$day/${day}_${stamp}_${src}_${sum}.${ext}.enc"
+    path="shots/$day/${day}_${stamp}_${src}_${sum}.${ext}"
 
-    enc=$(mktemp "$DIR/enc.XXXXXX")
-    if ! openssl enc -aes-256-cbc -md sha256 -salt -in "$f" -out "$enc" -pass "pass:$SCRAMBLE" 2>>"$LOG"; then
-      rm -f "$enc"; log "Could not scramble $(basename "$f"), will retry"; continue
-    fi
     body=$(mktemp "$DIR/body.XXXXXX")
     {
       printf '{"message":"Add %s","branch":"%s","content":"' "$path" "$BRANCH"
-      base64 -i "$enc" | tr -d '\n'
+      base64 -i "$f" | tr -d '\n'
       printf '"}'
     } > "$body"
-    rm -f "$enc"
-
-    code=$(curl -sS --max-time 120 -o "$DIR/last-response.json" -w '%{http_code}' -X PUT \
-      -H "Authorization: Bearer $TOKEN" \
-      -H "Accept: application/vnd.github+json" \
-      -H "X-GitHub-Api-Version: 2022-11-28" \
-      --data-binary @"$body" \
+    code=$(api -o "$DIR/last-response.json" -w '%{http_code}' -X PUT --data-binary @"$body" \
       "https://api.github.com/repos/$REPO/contents/$path" 2>>"$LOG")
     rm -f "$body"
 
@@ -86,3 +74,27 @@ for d in "${WATCH[@]}"; do
     fi
   done
 done
+
+# 2. Twice a day, delete uploads older than yesterday from GitHub.
+STAMP="$DIR/last-cleanup"
+if [ ! -f "$STAMP" ] || [ -n "$(find "$STAMP" -mmin +720 2>/dev/null)" ]; then
+  touch "$STAMP"
+  keep=$(TZ=America/New_York date -v-1d +%Y-%m-%d)
+  api "https://api.github.com/repos/$REPO/contents/shots?ref=$BRANCH" 2>>"$LOG" |
+    grep -o '"name": *"[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}"' | grep -o '[0-9]\{4\}-[0-9-]*' |
+  while read -r day; do
+    [[ "$day" < "$keep" ]] || continue
+    list=$(mktemp "$DIR/list.XXXXXX")
+    api "https://api.github.com/repos/$REPO/contents/shots/$day?ref=$BRANCH" > "$list" 2>>"$LOG"
+    paste -d' ' <(grep -o '"path": *"[^"]*"' "$list" | sed 's/.*: *"//; s/"$//') \
+                <(grep -o '"sha": *"[^"]*"' "$list" | sed 's/.*: *"//; s/"$//') |
+    while read -r p sha; do
+      [ -n "$p" ] && [ -n "$sha" ] || continue
+      code=$(api -o /dev/null -w '%{http_code}' -X DELETE \
+        --data "{\"message\":\"Remove old $p\",\"sha\":\"$sha\",\"branch\":\"$BRANCH\"}" \
+        "https://api.github.com/repos/$REPO/contents/$p" 2>>"$LOG")
+      log "Cleanup: removed $p (HTTP $code)"
+    done
+    rm -f "$list"
+  done
+fi
