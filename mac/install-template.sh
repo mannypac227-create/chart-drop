@@ -1,7 +1,8 @@
 #!/bin/bash
 # Chart Drop installer. Run once on the Mac:  bash ~/Downloads/install-chart-drop.sh
 # It saves your GitHub key in the Mac Keychain and installs a small background
-# helper that uploads each new chart from ~/Dropbox/Charts to github.com/mannypac227-create/chart-drop.
+# helper that uploads new screenshots from ~/Dropbox/Charts and ~/Dropbox/Wholesale to
+# github.com/mannypac227-create/chart-drop, each in its own lane.
 # To remove it later:  bash ~/Downloads/install-chart-drop.sh --uninstall
 set -e
 
@@ -49,9 +50,9 @@ if ! security find-generic-password -s chart-drop -a github >/dev/null 2>&1; the
   echo "GitHub key saved in your Keychain."
 fi
 
-# 2. Plain uploads now (no scrambling): remove the old scramble key and re-upload today's charts.
+# 2. Make sure the Wholesale folder exists, and remove the old scramble key if present.
+mkdir -p "$HOME/Dropbox/Wholesale"
 security delete-generic-password -s chart-drop -a scramble >/dev/null 2>&1 || true
-rm -f "$DIR/uploaded.txt"
 
 # 3. The uploader script.
 cat > "$DIR/upload.sh" <<'CHARTDROP_EOF'
@@ -59,8 +60,9 @@ __UPLOADER__
 CHARTDROP_EOF
 chmod +x "$DIR/upload.sh"
 
-# 4. Run it in the background whenever a chart lands in Dropbox/Charts, and every 5 minutes.
+# 4. Run it in the background whenever a screenshot lands in either folder, and every 5 minutes.
 CHARTS=$(cd "$HOME/Dropbox/Charts" 2>/dev/null && pwd -P || echo "$HOME/Dropbox/Charts")
+WHOLESALE=$(cd "$HOME/Dropbox/Wholesale" 2>/dev/null && pwd -P || echo "$HOME/Dropbox/Wholesale")
 cat > "$PLIST" <<PLIST_EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -70,7 +72,7 @@ cat > "$PLIST" <<PLIST_EOF
   <key>ProgramArguments</key>
   <array><string>/bin/bash</string><string>$DIR/upload.sh</string></array>
   <key>WatchPaths</key>
-  <array><string>$CHARTS</string></array>
+  <array><string>$CHARTS</string><string>$WHOLESALE</string></array>
   <key>StartInterval</key><integer>300</integer>
   <key>RunAtLoad</key><true/>
   <key>StandardOutPath</key><string>$DIR/launchd.log</string>
@@ -83,14 +85,16 @@ launchctl bootout "gui/$UID_NUM" "$PLIST" 2>/dev/null || true
 launchctl bootstrap "gui/$UID_NUM" "$PLIST"
 
 # 5. Upload anything from the last 24 hours right now, so you can see it work.
-echo "Uploading your charts from the last 24 hours now..."
+echo "Uploading any new screenshots from the last 24 hours now..."
 /bin/bash "$DIR/upload.sh" || true
 echo ""
 if [ -s "$DIR/upload.log" ]; then
   tail -n 5 "$DIR/upload.log"
 else
-  echo "No charts from the last 24 hours to upload yet."
+  echo "Nothing new from the last 24 hours to upload yet."
 fi
 echo ""
-echo "Done. New charts saved in Dropbox/Charts will now upload to GitHub by themselves."
+echo "Done. Two lanes are now active:"
+echo "  Dropbox/Charts    -> your Hourly Forex & Gold Brief"
+echo "  Dropbox/Wholesale -> your Wholesale Property Reader"
 echo "If macOS asks whether bash may access files in Dropbox, click Allow."

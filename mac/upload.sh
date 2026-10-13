@@ -1,8 +1,10 @@
 #!/bin/bash
-# Chart Drop uploader: sends new chart screenshots from ~/Dropbox/Charts on this Mac
-# to the public GitHub repo mannypac227-create/chart-drop, so the cloud hourly
-# brief can read them even when this Mac is closed. Only the Charts folder is
-# uploaded. Uploads older than yesterday are deleted from GitHub once a day.
+# Chart Drop uploader: sends new screenshots from two Dropbox folders on this Mac
+# to the public GitHub repo mannypac227-create/chart-drop, each in its own lane:
+#   ~/Dropbox/Charts    -> shots/      (read by the Hourly Forex & Gold Brief)
+#   ~/Dropbox/Wholesale -> wholesale/  (read by the Wholesale Property Reader)
+# Nothing else is uploaded. Old uploads are deleted from GitHub automatically
+# (charts after yesterday, wholesale screenshots after 7 days).
 # Runs in the background (launchd) whenever a chart lands, and every 5 minutes.
 set -u
 
@@ -11,7 +13,8 @@ BRANCH="main"
 DIR="$HOME/.chart-drop"
 STATE="$DIR/uploaded.txt"
 LOG="$DIR/upload.log"
-WATCH=("$HOME/Dropbox/Charts")
+WATCH=("$HOME/Dropbox/Charts" "$HOME/Dropbox/Wholesale")
+lane_of() { case "$(basename "$1")" in Wholesale) echo wholesale;; *) echo shots;; esac; }
 MAX_AGE_MIN=1440   # catch up on anything from the last 24 hours
 
 mkdir -p "$DIR"
@@ -42,6 +45,7 @@ sleep 3   # give a just-taken screenshot time to finish writing
 for d in "${WATCH[@]}"; do
   [ -d "$d" ] || continue
   src=$(basename "$d" | tr 'A-Z ' 'a-z-')
+  lane=$(lane_of "$d")
   find "$d" -maxdepth 1 -type f \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' \) \
        -mmin "-$MAX_AGE_MIN" -print0 2>>"$LOG" |
   while IFS= read -r -d '' f; do
@@ -53,7 +57,7 @@ for d in "${WATCH[@]}"; do
     day=$(TZ=America/New_York date -r "$mt" +%Y-%m-%d)
     stamp=$(TZ=America/New_York date -r "$mt" +%H-%M-%S)
     sum=$(md5 -q "$f" | cut -c1-8)
-    path="shots/$day/${day}_${stamp}_${src}_${sum}.${ext}"
+    path="$lane/$day/${day}_${stamp}_${src}_${sum}.${ext}"
 
     body=$(mktemp "$DIR/body.XXXXXX")
     {
@@ -75,17 +79,16 @@ for d in "${WATCH[@]}"; do
   done
 done
 
-# 2. Twice a day, delete uploads older than yesterday from GitHub.
-STAMP="$DIR/last-cleanup"
-if [ ! -f "$STAMP" ] || [ -n "$(find "$STAMP" -mmin +720 2>/dev/null)" ]; then
-  touch "$STAMP"
-  keep=$(TZ=America/New_York date -v-1d +%Y-%m-%d)
-  api "https://api.github.com/repos/$REPO/contents/shots?ref=$BRANCH" 2>>"$LOG" |
+# 2. Twice a day, delete old uploads from GitHub (charts: older than yesterday;
+#    wholesale: older than 7 days).
+cleanup() {
+  local lane="$1" keep="$2"
+  api "https://api.github.com/repos/$REPO/contents/$lane?ref=$BRANCH" 2>>"$LOG" |
     grep -o '"name": *"[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}"' | grep -o '[0-9]\{4\}-[0-9-]*' |
   while read -r day; do
     [[ "$day" < "$keep" ]] || continue
     list=$(mktemp "$DIR/list.XXXXXX")
-    api "https://api.github.com/repos/$REPO/contents/shots/$day?ref=$BRANCH" > "$list" 2>>"$LOG"
+    api "https://api.github.com/repos/$REPO/contents/$lane/$day?ref=$BRANCH" > "$list" 2>>"$LOG"
     paste -d' ' <(grep -o '"path": *"[^"]*"' "$list" | sed 's/.*: *"//; s/"$//') \
                 <(grep -o '"sha": *"[^"]*"' "$list" | sed 's/.*: *"//; s/"$//') |
     while read -r p sha; do
@@ -97,4 +100,10 @@ if [ ! -f "$STAMP" ] || [ -n "$(find "$STAMP" -mmin +720 2>/dev/null)" ]; then
     done
     rm -f "$list"
   done
+}
+STAMP="$DIR/last-cleanup"
+if [ ! -f "$STAMP" ] || [ -n "$(find "$STAMP" -mmin +720 2>/dev/null)" ]; then
+  touch "$STAMP"
+  cleanup shots "$(TZ=America/New_York date -v-1d +%Y-%m-%d)"
+  cleanup wholesale "$(TZ=America/New_York date -v-7d +%Y-%m-%d)"
 fi
